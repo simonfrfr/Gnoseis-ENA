@@ -24,13 +24,23 @@
 #include "driverlib/sysctl.h"
 #include "driverlib/adc.h"
 #include "driverlib/uart.h"
+#include "utils/spi_flash.h"
 #include "utils/uartstdio.h"
 #include "driverlib/ssi.h"
 #include "math.h"
 #include <string.h>
 
 int SystemMode = 0;
-long int currentIndex = 0x00;
+uint32_t currentIndex = 0x00;
+uint32_t currentSector = 0x00;
+uint32_t Block[256];
+uint32_t writeBlock[256];
+uint32_t manufacturer = 0x00;
+uint32_t CodeStartSector = 0x00;
+uint32_t CodeStopSector = 0x00;
+uint32_t ModuleType = 0x00;
+uint32_t moduleData[256];
+
 void InitConsole(void)
 {
 		SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
@@ -71,25 +81,8 @@ unsigned char ifStatement(long int var1, unsigned char compareType, long int var
 	}
 	return 0x00;
 }
-void nextInstruction() {
-	//TODO ADD INSTRUCTIONS HERE TO GRAB NEXT PART;
-	currentIndex++;
-}
-void destroyInternalVariables(long int start, long int end) {
-	//TODO ADD INSTRUCTIONS HERE TO KILL LOCAL VARIABLES;
-}
-void whileLoop(long int var1, unsigned char compareType, long int var2, long int endIndex) {
-	long int startIndex = currentIndex;
-	while (ifStatement(var1,compareType,var2) == 0x01) {
-		int i;
-		for (i = 0; i < endIndex - currentIndex; i++) {
-			nextInstruction();
-		}
-		destroyInternalVariables(startIndex, endIndex);
-		currentIndex = startIndex + 0x01;
-	}
 
-}
+
 uint32_t getADC_Channel(uint32_t portFamily, uint32_t portNumber) {
 	if (portFamily == GPIO_PORTE_BASE && portNumber == GPIO_PIN_3) {
 		return ADC_CTL_CH0;
@@ -451,17 +444,7 @@ void writePort(uint32_t portFamily, uint32_t portNumber, char state) {
 		GPIOPinWrite(portFamily,portNumber, 0x00);
 	}
 }
-void forLoop(long int start, long int end, long int increment, long int endIndex) {
-	long int startIndex = currentIndex;
-	for (start = start; start != end; start+=increment) {
-		int i;
-		for (i = 0; i < endIndex - currentIndex; i++) {
-			nextInstruction();
-		}
-		destroyInternalVariables(startIndex, endIndex);
-		currentIndex = startIndex + 0x01;
-	}
-}
+
 void delay(long ns125) {
 	SysCtlDelay(ns125); //Delay in intervals of 12.5ns
 }
@@ -547,32 +530,231 @@ void startStepper(void){
 		GPIOPinWrite(GPIO_PORTC_BASE, GPIO_PIN_5, GPIO_PIN_5); // STEPPER
 		SysCtlDelay(20000); //125000ns = 125us*2
 		GPIOPinWrite(GPIO_PORTC_BASE, GPIO_PIN_5, 0); // STEPPER
-		SysCtlDelay(20000); //125000ns = 125us*2
+		SysCtlDelay(20000); //125000ns = 125us*25t
 	}
 }
-void SPITEST(){
-	uint32_t val2 = {0x9F};
-	uint32_t vals[32];
-	SysCtlPeripheralEnable(SYSCTL_PERIPH_SSI2);
-	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
-	GPIOPinConfigure(GPIO_PB4_SSI2CLK);
-	GPIOPinConfigure(GPIO_PB5_SSI2FSS);
-	GPIOPinConfigure(GPIO_PB6_SSI2RX);
-	GPIOPinConfigure(GPIO_PB7_SSI2TX);
-	GPIOPinTypeSSI(GPIO_PORTB_BASE,GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7);
-	SSIConfigSetExpClk(SSI2_BASE,SysCtlClockGet(),SSI_FRF_MOTO_MODE_3,SSI_MODE_MASTER,25000000,8);
-	SSIEnable(SSI2_BASE);
+void writeData(uint32_t manufacturer, uint32_t address, uint32_t len){
+	uint32_t reply;
+	if (manufacturer == 0x01) { //Spansion
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, 0x00);
+		while(SSIDataGetNonBlocking(SSI2_BASE, &reply));
+		SSIDataPut(SSI2_BASE, 0x01);
+		SSIDataPut(SSI2_BASE, (address >> 16) & 0xFF);
+		SSIDataPut(SSI2_BASE, (address >> 8) & 0xFF);
+		SSIDataPut(SSI2_BASE, address & 0xFF);
+		uint32_t i = 0;
+	    while(i < len)
+	    {
+	      SSIDataPut(SSI2_BASE, writeBlock[i]);
+	      i++;
+	    }
+		while(SSIBusy(SSI2_BASE));
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, GPIO_PIN_5);
+		UARTprintf("Data Sent to %d | %d Bytes\n",address, len);
+	}
+}
+void readData(uint32_t manufacturer, uint32_t address, uint32_t len){
+	uint32_t reply;
+	if (manufacturer == 0x01) { //Spansion
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, 0x00);
+		while(SSIDataGetNonBlocking(SSI2_BASE, &reply));
+		SSIDataPut(SSI2_BASE, 0x03);
+		SSIDataPut(SSI2_BASE, (address >> 16) & 0xFF);
+		SSIDataPut(SSI2_BASE, (address >> 8) & 0xFF);
+		SSIDataPut(SSI2_BASE, address & 0xFF);
 
-	while(1) {
-		SSIDataPutNonBlocking(SSI2_BASE, 0x0000009F);
-		SSIDataGetNonBlocking(SSI0_BASE, &vals[0]);
-		SSIDataGetNonBlocking(SSI0_BASE, &vals[1]);
-		SSIDataGetNonBlocking(SSI0_BASE, &vals[2]);
+		uint32_t i = 0;
+		while(i < len) {
+			SSIDataPut(SSI2_BASE, 0x00);
+		    SSIDataGet(SSI2_BASE, &Block[i]);
+		    i++;
+		}
+		while(SSIBusy(SSI2_BASE));
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, GPIO_PIN_5);
+		i = 0;
+		while (i < len) {
+			UARTprintf("Responce %d: %d\n",i,Block[i]);
+			i++;
+		}
+
+	}
+}
+void grabNextModule() {
+	//TODO Need to come up with a protocol to grab the next Module.
+	CodeStartSector = 0x00;
+	CodeStopSector = 0x00;
+	ModuleType = 0x00;
+}
+
+void destroyInternalVariables(long int start, long int end) {
+	//TODO ADD INSTRUCTIONS HERE TO KILL LOCAL VARIABLES;
+}
+
+void nextInstruction() {
+	//TODO ADD INSTRUCTIONS HERE TO GRAB NEXT PART;
+	if (currentIndex == 255) {
+		currentIndex = 0;
+		currentSector++;
+		if (currentSector == CodeStopSector+1) {
+			currentIndex = 0;
+			currentSector = 0;
+			grabNextModule();
+		}
+		readData(manufacturer, currentSector << 2, 256);
+	}
+	else {
+	currentIndex++;
+	}
+}
+void whileLoop(long int var1, unsigned char compareType, long int var2, long int endIndex) {
+	long int startIndex = currentIndex;
+	while (ifStatement(var1,compareType,var2) == 0x01) {
+		int i;
+		for (i = 0; i < endIndex - currentIndex; i++) {
+			nextInstruction();
+		}
+		destroyInternalVariables(startIndex, endIndex);
+		currentIndex = startIndex + 0x01;
+	}
+
+}
+
+void forLoop(long int start, long int end, long int increment, long int endIndex) {
+	long int startIndex = currentIndex;
+	for (start = start; start != end; start+=increment) {
+		int i;
+		for (i = 0; i < endIndex - currentIndex; i++) {
+			nextInstruction();
+		}
+		destroyInternalVariables(startIndex, endIndex);
+		currentIndex = startIndex + 0x01;
+	}
+}
+
+uint32_t readStatusRegister(uint32_t manufacturer){
+	uint32_t reply;
+	uint32_t vals[2];
+	if (manufacturer == 0x01) { //Spansion
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, 0x00);
+		while(SSIDataGetNonBlocking(SSI2_BASE, &reply));
+		SSIDataPut(SSI2_BASE, 0x05);
+		SSIDataGet(SSI2_BASE, &vals[0]);
+		SSIDataPut(SSI2_BASE, 0x00);
+		SSIDataGet(SSI2_BASE, &vals[1]);
+		SSIDataPut(SSI2_BASE, 0x00);
+		while(SSIBusy(SSI2_BASE));
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, GPIO_PIN_5);
+		//UARTprintf("Responce 1: %d\n",vals[0]);
+		//UARTprintf("Responce 2: %d\n",vals[1]);
+
+	}
+		return vals[1];
+
+}
+void writeStatusRegister(uint32_t manufacturer, uint32_t data){
+	uint32_t reply;
+	if (manufacturer == 0x01) { //Spansion
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, 0x00);
+		while(SSIDataGetNonBlocking(SSI2_BASE, &reply));
+		SSIDataPut(SSI2_BASE, 0x05);
+		SSIDataPut(SSI2_BASE, data);
+		while(SSIBusy(SSI2_BASE));
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, GPIO_PIN_5);
+		//UARTprintf("Responce 1: %d\n",vals[0]);
+		//UARTprintf("Responce 2: %d\n",vals[1]);
+
+	}
+}
+
+void eraseSector(uint32_t manufacturer, uint32_t address){ // 4kB
+	uint32_t reply;
+	if (manufacturer == 0x01) { //Spansion
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, 0x00);
+		while(SSIDataGetNonBlocking(SSI2_BASE, &reply));
+		SSIDataPut(SSI2_BASE, 0x06);
+		SSIDataPut(SSI2_BASE, (address & 0xFF0000) >> 16);
+		SSIDataPut(SSI2_BASE, (address & 0xFF00) >> 8);
+		SSIDataPut(SSI2_BASE, address & 0xFF);
+		while(SSIBusy(SSI2_BASE));
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, GPIO_PIN_5);
+		UARTprintf("Sector %d erased\n",address);
+	}
+
+}
+void setWritable(uint32_t manufacturer){
+	uint32_t reply;
+	if (manufacturer == 0x01) { //Spansion
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, 0x00);
+		while(SSIDataGetNonBlocking(SSI2_BASE, &reply));
+		SSIDataPut(SSI2_BASE, 0x06);
+		while(SSIBusy(SSI2_BASE));
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, GPIO_PIN_5);
+		//UARTprintf("Responce 1: %d\n",vals[0]);
+		//UARTprintf("Responce 2: %d\n",vals[1]);
+
+	}
+
+}
+void unsetWritable(uint32_t manufacturer){
+	uint32_t reply;
+	if (manufacturer == 0x01) { //Spansion
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, 0x00);
+		while(SSIDataGetNonBlocking(SSI2_BASE, &reply));
+		SSIDataPut(SSI2_BASE, 0x04);
+		while(SSIBusy(SSI2_BASE));
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, GPIO_PIN_5);
+		//UARTprintf("Responce 1: %d\n",vals[0]);
+		//UARTprintf("Responce 2: %d\n",vals[1]);
+
+	}
+
+}
+uint32_t getManufacturer(){
+	uint32_t reply;
+	uint32_t vals[4];
+	uint32_t i = 0;
+	while (i < 10) {
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, 0x00);
+		while(SSIDataGetNonBlocking(SSI2_BASE, &reply));
+		SSIDataPut(SSI2_BASE, 0x9F);
+		SSIDataGet(SSI2_BASE, &vals[0]);
+		SSIDataPut(SSI2_BASE, 0x00);
+		SSIDataGet(SSI2_BASE, &vals[1]);
+		SSIDataPut(SSI2_BASE, 0x00);
+		SSIDataGet(SSI2_BASE, &vals[2]);
+		SSIDataPut(SSI2_BASE, 0x00);
+		SSIDataGet(SSI2_BASE, &vals[3]);
+		SSIAdvDataPutFrameEnd(SSI2_BASE, 0x00);
+		GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, GPIO_PIN_5);
 		UARTprintf("Responce 1: %d\n",vals[0]);
 		UARTprintf("Responce 2: %d\n",vals[1]);
 		UARTprintf("Responce 3: %d\n",vals[2]);
-		SysCtlDelay(2000000); //12500000ns = 12500us*2
+		UARTprintf("Responce 4: %d\n",vals[3]);
+		if (vals[0] == 0x00 && vals[1] == 0x01 && vals[2] == 0x40 && vals[3] == 0x13) return 0x01;
+		i++;
 	}
+
+		return 0x00;
+
+}
+void initSSI(){
+		SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
+	    SysCtlPeripheralEnable(SYSCTL_PERIPH_SSI2);
+	    GPIOPinTypeGPIOOutput(GPIO_PORTB_BASE, GPIO_PIN_5);
+	    GPIOPinConfigure(GPIO_PB4_SSI2CLK);
+	    GPIOPinConfigure(GPIO_PB6_SSI2RX);
+	    GPIOPinConfigure(GPIO_PB7_SSI2TX);
+	    GPIOPinTypeSSI(GPIO_PORTB_BASE,GPIO_PIN_4|GPIO_PIN_6|GPIO_PIN_7);
+	    //TODO work
+	    SSIClockSourceSet(SSI2_BASE, SSI_CLOCK_SYSTEM);
+	    //UARTprintf("Configured 1/2 SSI\n");
+	    //SSIConfigSetExpClk(SSI2_BASE,SysCtlClockGet(),SSI_FRF_MOTO_MODE_0,SSI_MODE_MASTER,16000000,8);
+	    //SSIAdvModeSet(SSI2_BASE, SSI_ADV_MODE_READ_WRITE);
+	    //SSIAdvFrameHoldEnable(SSI2_BASE);
+	    //SSIEnable(SSI2_BASE);
+	    UARTprintf("Configured SSI\n");
+	    //SPIFlashInit(SSI2_BASE,SysCtlClockGet(),16000000);
+	    GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, GPIO_PIN_5);
 
 }
 main(void)
@@ -591,30 +773,65 @@ main(void)
     //InitI2C0();
     UARTprintf(" Startup!\n");
     //startStepper();
-   // SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOC);
-   // 			SysCtlDelay(3);
-   // 		GPIOPinTypeGPIOOutput(GPIO_PORTC_BASE, GPIO_PIN_5); //STEPPER
-   // while(1)
-   //     {
-   // 	GPIOPinWrite(GPIO_PORTC_BASE, GPIO_PIN_5, GPIO_PIN_5); // STEPPER
-   // 			SysCtlDelay(200000); //125000ns = 125us*2
-   // 			GPIOPinWrite(GPIO_PORTC_BASE, GPIO_PIN_5, 0); // STEPPER
-   // 			SysCtlDelay(200000); //125000ns = 125us*2
-   //     }
-    //pollLinearArrayT(); //For Linear Array
-    SPITEST();
-    UARTprintf(" :)\n");
+    initSSI();
+    manufacturer = getManufacturer();
+    //uint16_t DeviceID;
+        //GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, 0x00);
+        //SPIFlashReadID(SSI2_BASE,&manufacturer,&DeviceID);
+       // GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, GPIO_PIN_5);
+        //UARTprintf("Manufacturer: %d\nDevice ID: %d\n",manufacturer,DeviceID);
+
+    if (manufacturer == 0x01) {
+    	UARTprintf("Flash Manufacturer: Spansion\n");
+    }
+    else {
+    	UARTprintf("Flash Manufacturer: Unknown\n");
+    }
     while(1)
     {
     	if (UARTCharsAvail(UART0_BASE)){
-    		if (UARTCharGet(UART0_BASE) == '1') {
-    			UARTprintf(" Starting to Move\n");
-    			SystemMode = 1;
-    		}
+    	    char UART0IN = UARTCharGet(UART0_BASE);
+    	    if (UART0IN == '1') SystemMode = 1;
+    	    if (UART0IN == '2') SystemMode = 2;
+    	    if (UART0IN == '3') SystemMode = 3;
+    	    if (UART0IN == '4') SystemMode = 4;
+    	    if (UART0IN == '5') SystemMode = 5;
+    	    if (UART0IN == '6') SystemMode = 6;
+    	    if (UART0IN == '7') SystemMode = 7;
+    	    if (UART0IN == '8') SystemMode = 8;
+    	    if (UART0IN == '9') SystemMode = 9;
     	}
+
     	if (SystemMode == 1) {
     		//pollMovable();
-    		pollLinearArrayT(); //For Linear Array
+    		uint32_t status = readStatusRegister(manufacturer);
+    		UARTprintf("Status Register: %d\n",status);
+    		SystemMode = 0;
+    	}
+    	if (SystemMode == 2) {
+
+    		readData(manufacturer, 0x000000, 55);
+
+    	    SystemMode = 0;
+    	}
+    	if (SystemMode == 3) {
+    		uint32_t i = 0;
+    		while(i < 55) {
+    		writeBlock[i] = 0xAA;
+    		i++;
+    		}
+    		setWritable(manufacturer);
+    		i = 0;
+
+    		writeData(manufacturer, 0x000000, 55);
+    		SystemMode = 0;
+    	}
+    	if (SystemMode == 4) {
+    		eraseSector(manufacturer, 0x000000);
+    		//GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, 0x00);
+    		//SPIFlashSectorErase(SSI2_BASE,0x000000);
+    		//GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_5, 0xFF);
+    		SystemMode = 0;
     	}
     }
 }
